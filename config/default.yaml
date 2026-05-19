@@ -1,0 +1,93 @@
+# duant 默认配置
+
+# ===== 数据配置 =====
+data:
+  data_path: "./data"
+  db_path: "./data/duant.db"
+  tushare_token: "${TUSHARE_TOKEN}"
+
+# ===== 回测默认参数 =====
+backtest:
+  initial_cash: 1000000
+  commission:
+    a_stock:
+      rate: 0.00025
+      min: 5
+      stamp_tax: 0.001
+      transfer_fee: 0.000015
+    crypto:
+      rate: 0.001
+  slippage:
+    model: fixed
+    value: 0.01
+
+# ===== 交易配置 =====
+trade:
+  gateway: qmt
+  live_mode: false
+  confirm_large_order: true
+  large_order_pct: 0.2
+  qmt:
+    path: ""
+    account_id: ""
+  simulate:
+    broker: ths
+    confirm: true
+  crypto:
+    exchange: binance
+    api_key: "${CRYPTO_API_KEY}"
+    secret: "${CRYPTO_SECRET}"
+
+# ===== 风控配置 =====
+risk:
+  rules:
+    max_position:
+      enabled: true
+      max_pct: 0.3
+    max_daily_trades:
+      enabled: true
+      max_count: 20
+    stop_loss:
+      enabled: true
+      loss_pct: 0.05
+    take_profit:
+      enabled: false
+      profit_pct: 0.15
+    max_drawdown:
+      enabled: true
+      max_dd: 0.10
+    max_daily_loss:
+      enabled: true
+      max_loss: 0.03
+    max_holding:
+      enabled: true
+      max_count: 10
+    min_cash:
+      enabled: true
+      min_pct: 0.10
+
+# ===== 仓位管理 =====
+position:
+  sizer: fixed_percent
+  fixed_amount:
+    amount: 10000
+  fixed_percent:
+    pct: 0.1
+  kelly:
+    win_rate: 0.5
+    profit_loss_ratio: 2.0
+    fraction: 0.5
+  equal_risk:
+    target_risk: 0.01
+    lookback: 20
+
+# ===== 通知配置 =====
+notify:
+  webhooks: []
+
+# ===== 日志配置 =====
+log:
+  level: INFO
+  path: "./logs"
+  rotation: "1 day"
+  retention: "30 days"

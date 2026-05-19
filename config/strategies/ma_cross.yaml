@@ -1,0 +1,19 @@
+name: "均线金叉"
+market: a_stock
+symbols: ["000001.SZ"]
+timeframe: "1d"
+
+entry:
+  condition: "cross_up(ma(close, 5), ma(close, 20))"
+  action: buy
+  amount: 100
+
+exit:
+  condition: "cross_down(ma(close, 5), ma(close, 20))"
+  action: sell
+  amount: 100
+
+risk:
+  stop_loss: 0.05
+  take_profit: 0.15
+  max_position_pct: 0.3
