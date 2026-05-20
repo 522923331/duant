@@ -117,6 +117,15 @@ class RiskConfig:
 
 
 @dataclass
+class PositionSizerConfig:
+    sizer: str = "fixed_percent"  # fixed_amount / fixed_percent / kelly / equal_risk
+    fixed_amount: dict = field(default_factory=lambda: {"amount": 10000})
+    fixed_percent: dict = field(default_factory=lambda: {"pct": 0.1})
+    kelly: dict = field(default_factory=lambda: {"win_rate": 0.5, "profit_loss_ratio": 2.0, "fraction": 0.5})
+    equal_risk: dict = field(default_factory=lambda: {"target_risk": 0.01, "lookback": 20})
+
+
+@dataclass
 class NotifyConfig:
     webhooks: list[dict] = field(default_factory=list)
 
@@ -142,6 +151,7 @@ class AppConfig:
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     trade: TradeConfig = field(default_factory=TradeConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    position: PositionSizerConfig = field(default_factory=PositionSizerConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     log: LogConfig = field(default_factory=LogConfig)
 
@@ -203,11 +213,21 @@ def _dict_to_config(d: dict) -> AppConfig:
     for rule_name, rule_val in risk_cfg.get("rules", {}).items():
         risk.rules[rule_name] = RiskRuleConfig(**rule_val)
 
+    position_cfg = d.get("position", {})
+    position = PositionSizerConfig(
+        sizer=position_cfg.get("sizer", "fixed_percent"),
+        fixed_amount=position_cfg.get("fixed_amount", {"amount": 10000}),
+        fixed_percent=position_cfg.get("fixed_percent", {"pct": 0.1}),
+        kelly=position_cfg.get("kelly", {"win_rate": 0.5, "profit_loss_ratio": 2.0, "fraction": 0.5}),
+        equal_risk=position_cfg.get("equal_risk", {"target_risk": 0.01, "lookback": 20}),
+    )
+
     return AppConfig(
         data=DataConfig(**data_cfg),
         backtest=backtest,
         trade=trade,
         risk=risk,
+        position=position,
         notify=NotifyConfig(**notify_cfg),
         log=LogConfig(**log_cfg),
     )

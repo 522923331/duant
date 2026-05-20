@@ -34,8 +34,8 @@ class YamlStrategyLoader:
         exit_amount = exit_.get("amount", 0)
 
         class YamlStrategy(StrategyBase):
-            _entry_fn = entry_fn
-            _exit_fn = exit_fn
+            _entry_fn = staticmethod(entry_fn) if entry_fn else None
+            _exit_fn = staticmethod(exit_fn) if exit_fn else None
             _entry_action = entry_action
             _exit_action = exit_action
             _entry_amount = entry_amount

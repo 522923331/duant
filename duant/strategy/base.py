@@ -70,6 +70,7 @@ class Context:
     data_buffer: DataBuffer
     order_handler: OrderHandler
     current_bar: Bar | None = None
+    position_sizer: "PositionSizer | None" = None
 
 
 class StrategyBase(ABC):
@@ -114,7 +115,18 @@ class StrategyBase(ABC):
         pass
 
     # --- 交易接口 ---
-    def buy(self, symbol: str, amount: float, price: float = 0, order_type: OrderType = OrderType.MARKET) -> Order:
+    def buy(self, symbol: str, amount: float = 0, price: float = 0,
+            order_type: OrderType = OrderType.MARKET) -> Order:
+        """买入。amount=0 时自动使用仓位管理计算"""
+        actual_amount = amount
+        if actual_amount <= 0 and self.context.position_sizer:
+            current_price = price if price > 0 else (self.context.current_bar.close if self.context.current_bar else 0)
+            market = self.context.current_bar.market if self.context.current_bar else Market.A_STOCK
+            actual_amount = self.context.position_sizer.calculate(symbol, current_price, self._get_portfolio(), market)
+
+        if actual_amount <= 0:
+            actual_amount = 100  # 默认最小数量
+
         order = Order(
             order_id=_gen_id(),
             symbol=symbol,
@@ -122,7 +134,7 @@ class StrategyBase(ABC):
             side=OrderSide.BUY,
             order_type=order_type,
             price=price,
-            amount=amount,
+            amount=actual_amount,
             status=OrderStatus.PENDING,
             strategy_name=self.__class__.__name__,
             created_at=datetime.now(),
@@ -130,7 +142,26 @@ class StrategyBase(ABC):
         )
         return self.context.order_handler.submit(order)
 
-    def sell(self, symbol: str, amount: float, price: float = 0, order_type: OrderType = OrderType.MARKET) -> Order:
+    def sell(self, symbol: str, amount: float = 0, price: float = 0,
+             order_type: OrderType = OrderType.MARKET) -> Order:
+        """卖出。amount=0 时卖出全部持仓"""
+        actual_amount = amount
+        if actual_amount <= 0:
+            pos = self.get_position(symbol)
+            actual_amount = pos.quantity if pos else 0
+
+        if actual_amount <= 0:
+            from loguru import logger
+            logger.warning(f"卖出数量为 0，跳过: {symbol}")
+            return Order(
+                order_id=_gen_id(), symbol=symbol,
+                market=self.context.current_bar.market if self.context.current_bar else Market.A_STOCK,
+                side=OrderSide.SELL, order_type=order_type, price=price,
+                amount=0, status=OrderStatus.CANCELLED,
+                strategy_name=self.__class__.__name__,
+                created_at=datetime.now(), updated_at=datetime.now(),
+            )
+
         order = Order(
             order_id=_gen_id(),
             symbol=symbol,
@@ -138,7 +169,7 @@ class StrategyBase(ABC):
             side=OrderSide.SELL,
             order_type=order_type,
             price=price,
-            amount=amount,
+            amount=actual_amount,
             status=OrderStatus.PENDING,
             strategy_name=self.__class__.__name__,
             created_at=datetime.now(),
@@ -169,6 +200,33 @@ class StrategyBase(ABC):
         if len(series_a) < 2 or len(series_b) < 2:
             return False
         return series_a.iloc[-2] >= series_b.iloc[-2] and series_a.iloc[-1] < series_b.iloc[-1]
+
+    def _get_portfolio(self):
+        """获取 Portfolio 对象（用于仓位管理）"""
+        # 回测时由引擎注入，通过 context 间接访问
+        return getattr(self.context, '_portfolio', None) or _PortfolioAdapter(self.context.account)
+
+
+class _PortfolioAdapter:
+    """将 Account 适配为 Portfolio 接口供 PositionSizer 使用"""
+
+    def __init__(self, account: Account):
+        self.cash = account.cash
+        self._positions = {}
+        for p in account.positions:
+            self._positions[p.symbol] = {
+                "quantity": p.quantity,
+                "avg_price": p.avg_price,
+                "market": p.market,
+                "current_price": p.current_price,
+            }
+
+    @property
+    def positions(self) -> dict:
+        return self._positions
+
+    def get_total_value(self) -> float:
+        return sum(p["current_price"] * p["quantity"] for p in self._positions.values()) + self.cash
 
 
 def _gen_id() -> str:

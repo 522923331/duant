@@ -3,7 +3,7 @@
 import numpy as np
 from dataclasses import dataclass
 
-from duant.core.event import BacktestMetrics, OrderSide
+from duant.core.event import BacktestMetrics, OrderSide, Trade
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ def calculate_metrics(portfolio, initial_cash: float) -> BacktestMetrics:
     daily_returns = _calc_daily_returns(equity)
     sharpe_ratio = _calc_sharpe(daily_returns, risk_free=0.02)
 
-    # 胜率和盈亏比
+    # 胜率和盈亏比（基于配对买卖计算真实盈亏）
     win_rate, profit_loss_ratio = _calc_win_stats(trades)
 
     return BacktestMetrics(
@@ -94,34 +94,50 @@ def _calc_sharpe(daily_returns: list[float], risk_free: float = 0.02) -> float:
     if std_return == 0:
         return 0.0
 
-    # 年化
     daily_rf = risk_free / 252
     sharpe = (mean_return - daily_rf) / std_return * np.sqrt(252)
     return round(sharpe, 2)
 
 
-def _calc_win_stats(trades: list) -> tuple[float, float]:
-    """胜率和盈亏比"""
-    if not trades:
+def _calc_win_stats(trades: list[Trade]) -> tuple[float, float]:
+    """基于买卖配对计算胜率和盈亏比
+
+    用 FIFO 匹配：买入建仓，卖出平仓，计算每笔平仓的真实盈亏
+    """
+    # 按标的分组，FIFO 匹配买卖
+    open_positions: dict[str, list[tuple[float, float]]] = {}  # symbol -> [(price, qty)]
+    realized_pnls: list[float] = []
+
+    for t in trades:
+        sym = t.symbol
+        if sym not in open_positions:
+            open_positions[sym] = []
+
+        if t.side == OrderSide.BUY:
+            open_positions[sym].append((t.price, t.amount))
+        elif t.side == OrderSide.SELL:
+            remaining = t.amount
+            # FIFO 匹配已买入的仓位
+            while remaining > 0 and open_positions[sym]:
+                buy_price, buy_qty = open_positions[sym][0]
+                matched = min(remaining, buy_qty)
+                # 真实盈亏 = (卖出价 - 买入价) * 匹配数量 - 手续费摊销
+                pnl = (t.price - buy_price) * matched
+                realized_pnls.append(pnl)
+
+                remaining -= matched
+                if matched >= buy_qty:
+                    open_positions[sym].pop(0)
+                else:
+                    open_positions[sym][0] = (buy_price, buy_qty - matched)
+
+    if not realized_pnls:
         return 0.0, 0.0
 
-    # 只看卖出交易的盈亏
-    sell_trades = [t for t in trades if t.side == OrderSide.SELL]
-    if not sell_trades:
-        return 0.0, 0.0
+    wins = [p for p in realized_pnls if p > 0]
+    losses = [p for p in realized_pnls if p < 0]
 
-    # 简化：用每笔交易的盈亏来算
-    pnl_list = []
-    for t in sell_trades:
-        # 简化计算：卖出价 - 买入均价（需要更精确的实现来跟踪每笔卖出对应的买入价）
-        # 这里用手续费反推近似
-        pnl = -(t.commission + t.slippage)  # 至少扣除手续费
-        pnl_list.append(pnl)
-
-    wins = [p for p in pnl_list if p > 0]
-    losses = [p for p in pnl_list if p < 0]
-
-    win_rate = len(wins) / len(pnl_list) if pnl_list else 0
+    win_rate = len(wins) / len(realized_pnls)
     avg_win = sum(wins) / len(wins) if wins else 0
     avg_loss = abs(sum(losses) / len(losses)) if losses else 0
     profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0

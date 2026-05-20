@@ -31,11 +31,13 @@ class Portfolio:
     def __init__(self, initial_cash: float):
         self.initial_cash = initial_cash
         self.cash: float = initial_cash
-        self._positions: dict[str, dict] = {}  # symbol -> {quantity, avg_price}
+        self._positions: dict[str, dict] = {}  # symbol -> {quantity, avg_price, market}
+        self._latest_prices: dict[str, float] = {}  # symbol -> latest close price
         self.trades: list[Trade] = []
         self.equity_records: list[dict] = []
         self._peak_value: float = initial_cash
         self._realized_pnl: float = 0.0
+        self._daily_start_value: float = initial_cash  # 当日起始净值
 
     @property
     def positions(self) -> dict[str, dict]:
@@ -80,17 +82,15 @@ class Portfolio:
         self.trades.append(trade)
 
     def update_price(self, symbol: str, price: float) -> None:
-        """更新持仓市价（仅用于市值计算，不修改持仓数据）"""
-        # 在 get_account 时实时计算
+        """更新标的最新价格"""
+        self._latest_prices[symbol] = price
 
     def get_total_value(self, prices: dict[str, float] | None = None) -> float:
         """总资产 = cash + 持仓市值"""
         market_value = 0.0
         for sym, pos in self._positions.items():
-            if prices and sym in prices:
-                market_value += prices[sym] * pos["quantity"]
-            else:
-                market_value += pos["avg_price"] * pos["quantity"]
+            price = (prices or self._latest_prices).get(sym, pos["avg_price"])
+            market_value += price * pos["quantity"]
         return self.cash + market_value
 
     def get_account(self, prices: dict[str, float] | None = None) -> Account:
@@ -100,7 +100,7 @@ class Portfolio:
         now = datetime.now()
 
         for sym, pos in self._positions.items():
-            current_price = prices.get(sym, pos["avg_price"]) if prices else pos["avg_price"]
+            current_price = (prices or self._latest_prices).get(sym, pos["avg_price"])
             mv = current_price * pos["quantity"]
             unrealized = (current_price - pos["avg_price"]) * pos["quantity"]
             market_value += mv
@@ -127,12 +127,12 @@ class Portfolio:
 
     def snapshot_equity(self, date: str, prices: dict[str, float] | None = None) -> None:
         """记录每日净值"""
+        total = self.get_total_value(prices)
         market_value = 0.0
         for sym, pos in self._positions.items():
-            price = prices.get(sym, pos["avg_price"]) if prices else pos["avg_price"]
+            price = (prices or self._latest_prices).get(sym, pos["avg_price"])
             market_value += price * pos["quantity"]
 
-        total = self.cash + market_value
         self._peak_value = max(self._peak_value, total)
 
         self.equity_records.append({
@@ -142,6 +142,12 @@ class Portfolio:
             "total_value": total,
             "realized_pnl": self._realized_pnl,
         })
+
+    def get_daily_pnl_pct(self) -> float:
+        """当日盈亏比例"""
+        if self._daily_start_value <= 0:
+            return 0
+        return (self.get_total_value() - self._daily_start_value) / self._daily_start_value
 
 
 class BacktestOrderHandler(OrderHandler):
@@ -162,6 +168,16 @@ class BacktestEngine:
         self.config = config or BacktestConfig()
         self.store = ParquetStore(data_path)
         self.matcher = OrderMatcher(self.config)
+        self.risk_manager = None  # 可选接入风控
+        self.position_sizer = None  # 可选接入仓位管理
+
+    def set_risk_manager(self, risk_manager) -> None:
+        """接入风控管理器"""
+        self.risk_manager = risk_manager
+
+    def set_position_sizer(self, position_sizer) -> None:
+        """接入仓位管理器"""
+        self.position_sizer = position_sizer
 
     def run(
         self,
@@ -216,40 +232,67 @@ class BacktestEngine:
             indicators=indicators,
             data_buffer=buffer,
             order_handler=order_handler,
+            position_sizer=self.position_sizer,
         )
+        ctx._portfolio = portfolio
         strategy.set_context(ctx)
         strategy.on_start()
 
         # 4. 逐 bar 推送
         current_date = ""
+        strategy_halted = False
+
         for bar in all_bars:
             # 缓存 bar 数据
             buffer.append(bar)
             ctx.current_bar = bar
 
-            # 策略计算
+            # 更新最新价格
+            portfolio.update_price(bar.symbol, bar.close)
+
+            # 每日净值快照（在策略计算前，记录日起始值）
+            bar_date = bar.datetime.strftime("%Y-%m-%d")
+            if bar_date != current_date:
+                if current_date:
+                    portfolio.snapshot_equity(current_date)
+                portfolio._daily_start_value = portfolio.get_total_value()
+                current_date = bar_date
+
+                # 市场级风控检查（新的一天）
+                if self.risk_manager:
+                    events = self.risk_manager.check_market(portfolio)
+                    if events:
+                        strategy_halted = True
+                        for event in events:
+                            logger.warning(f"风控触发: {event.detail}")
+
+            # 策略计算（如果未被风控暂停）
             order_handler.pending_orders.clear()
-            try:
-                strategy.on_bar(bar)
-            except Exception as e:
-                logger.error(f"策略异常 (bar={bar.datetime}): {e}")
-                continue
+            if not strategy_halted:
+                try:
+                    strategy.on_bar(bar)
+                except Exception as e:
+                    logger.error(f"策略异常 (bar={bar.datetime}): {e}")
+                    continue
 
             # 撮合订单
-            prices = {bar.symbol: bar.close}
             for order in order_handler.pending_orders:
+                # 风控检查
+                if self.risk_manager:
+                    passed, reason = self.risk_manager.check(order, portfolio)
+                    if not passed:
+                        continue
+
                 trade = self.matcher.match(order, bar)
                 if trade:
                     portfolio.apply_trade(trade)
 
-            # 每日净值快照
-            bar_date = bar.datetime.strftime("%Y-%m-%d")
-            if bar_date != current_date:
-                portfolio.snapshot_equity(bar_date, prices)
-                current_date = bar_date
-
             # 更新账户
-            ctx._account = portfolio.get_account(prices)
+            ctx._account = portfolio.get_account()
+
+        # 最后一天快照
+        if current_date:
+            portfolio.snapshot_equity(current_date)
 
         strategy.on_stop()
 
@@ -263,7 +306,17 @@ class BacktestEngine:
             metrics=metrics,
             trades=tuple(portfolio.trades),
             equity_curve=equity_curve,
-            positions=tuple(portfolio._positions.items()),
+            positions=tuple(
+                (sym, Position(
+                    symbol=sym, market=pos["market"],
+                    quantity=pos["quantity"], avg_price=pos["avg_price"],
+                    current_price=portfolio._latest_prices.get(sym, pos["avg_price"]),
+                    unrealized_pnl=(portfolio._latest_prices.get(sym, pos["avg_price"]) - pos["avg_price"]) * pos["quantity"],
+                    market_value=portfolio._latest_prices.get(sym, pos["avg_price"]) * pos["quantity"],
+                    updated_at=datetime.now(),
+                ))
+                for sym, pos in portfolio._positions.items()
+            ),
         )
 
         logger.info(f"回测完成: 总收益率={metrics.total_return:.2%}, "
